@@ -1,0 +1,8 @@
+
+admins.py - 700 priority
+antiflood.py - 650 priority
+chatmeta.py - 640 priority
+bad_users_and_conf.py - 630 priority
+xp_giver.py - 620 priority
+prefix.py - 500 priority
+malware.py - 450 priority

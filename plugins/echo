@@ -1,0 +1,13 @@
+from kutana import Plugin
+
+plugin = Plugin(name="Echo", cmds=['привет - тестовая команда',
+                                   'вложения - выводить вложения'])
+
+
+@plugin.on_startswith_text("привет")
+async def on_message(message, attachments, env):
+    print(message)
+    print(attachments)
+    print(env)
+    print(message.raw_update["object"]["fwd_messages"])
+    await env.reply("Wow i'm work and thaht's so funфвфвфв")

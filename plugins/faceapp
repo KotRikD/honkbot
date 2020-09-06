@@ -1,0 +1,73 @@
+from PIL import Image
+import io
+import aiohttp
+from kutana import Plugin
+from database import *
+from faceapp.faceapp import FaceApp
+from utils.static_text import need_vip
+from utils import priviligeshelper
+
+plugin = Plugin(name="Сделать из своего лица что-то", cmds=[{'command': 'лицо <фильтр> [фото]', 'desc': 'делает из лица что-то', 'vip': True}])
+
+
+@plugin.on_startswith_text("лицо")
+async def on_message(message, attachments, env):
+    privs = await priviligeshelper.getUserPriviliges(env, message.from_id)
+    if not (privs & priviligeshelper.USER_VIP > 0):
+        return await env.reply(need_vip)
+
+    if not env['args']:
+        await env.reply("Смотри чё над делать:\n"
+                        "Список фильтров:\n"
+                        "- женщина - превращает лицо в бабское\n"
+                        "- ахуенное - превращает лицо в ахуенное(вроде так это переводиится)\n"
+                        "- старое - превращает лицо в старца\n"
+                        "- улыбка - делает улыбчивое лицо\n"
+                        "- юное - делает юное лицо")
+        return "DONE"
+
+    env['args'][0] = env['args'][0].lower()
+    if env['args'][0] == "женщина":
+        filer = "female"
+    elif env['args'][0] == "ахуенное":
+        filer = "hot"
+    elif env['args'][0] == "старое":
+        filer = "old"
+    elif env['args'][0] == "улыбка":
+        filer = "smile"
+    elif env['args'][0] == "юное":
+        filer = "young"
+    else:
+        await env.reply(f"Прочти справку пожалуйста прежде чем писать!")
+        return "DONE"
+
+    photo = False
+    for x in attachments:
+        if x.type == "photo":
+            photo = True
+            break
+
+    Fa = FaceApp()
+    if not photo:
+        return await env.reply('Вы не прислали фото!')
+
+    attach = attachments[0]
+
+    if not attach.link:
+        return await env.reply('Вы не прислали фото!')
+
+    async with aiohttp.ClientSession() as sess:
+        async with sess.get(attach.link) as response:
+            code = Fa.get_code(io.BytesIO(await response.read()))
+    #Если всё ок!
+    buffer = io.BytesIO()
+    b = Fa.make_img(code, filer)
+    if type(b) is str:
+        return await env.reply("Хм, на фото нету лица.")
+
+    img = Image.open(io.BytesIO(b))
+    img.save(buffer, format='PNG')
+    buffer.seek(0)
+
+    result = await env.upload_photo(buffer)
+    return await env.reply("Держи", attachment=result)

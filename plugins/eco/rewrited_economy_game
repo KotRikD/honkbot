@@ -1,0 +1,998 @@
+
+import re
+from datetime import timedelta
+from decimal import *
+
+import aiohttp
+import asyncio
+import datetime
+import peewee_async
+import random
+import time
+
+from database import *
+from kutana import Plugin
+from utils import plural_form, parse_user_name, schedule_api_task, priviligeshelper
+
+plugin = Plugin(name="Экономика v4", cmds=[
+    {'command': 'фермы', 'desc': 'показывает какие майнинг-фермы есть'},
+    {'command': 'бизнесы', 'desc': 'показывает какие есть бизнесы'},
+    {'command': 'профиль', 'desc': 'твой профиль'},
+    {'command': 'машины', 'desc': 'показывает какие машины есть'},
+    {'command': 'товары', 'desc': 'показывает все возможные группы'},
+    {'command': 'вертолёты/самолёты', 'desc': 'показывает какие есть товары из этих групп'},
+    {'command': 'дома', 'desc': 'показывает все дома в магазинах'},
+    {'command': 'квартиры', 'desc': 'показывает все квартиры'},
+    {'command': 'телефоны', 'desc': 'показывает все телефоны'},
+    {'command': 'продать', 'desc': 'продать тот или иной предмет'},
+    {'command': 'передать', 'desc': 'передача валюты между пользователями'},
+    {'command': 'биткоин купить/продать/передать', 'desc': 'всё что связанно с биткоинами'},
+    {'command': 'рейтинг', 'desc': 'рейтинг для списка богачей'},
+    {'command': 'майнер', 'desc': 'просмотреть или снять деньги с майнера'},
+    {'command': 'бизнес статистика/снять', 'desc': 'просмотреть или снять деньги с бизнеса'}])
+
+user_jobsd = {}
+is_active = {}
+jobs_userd = {}
+models = []
+active = True
+backsider = "\n"
+
+
+def toFixed(f: float, n=0):
+    a, b = str(f).split('.')
+    return '{}{}{}'.format(a, b[:n], '0' * (n - len(b)))
+
+
+def convert_timedelta(duration):
+    days, seconds = duration.days, duration.seconds
+    hours = days * 24 + seconds // 3600
+    minutes = (seconds % 3600) // 60
+    seconds = (seconds % 60)
+    return hours, minutes, seconds
+
+
+async def get_btc(nep):
+    while True:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get("https://blockchain.info/ru/ticker") as resp:
+                res = await resp.json()
+                data = res['USD']['sell']
+                plugin.bitcoin_price = toFixed(data)
+        await asyncio.sleep(3600)
+
+
+async def get_or_create_profile(user_id):
+    try:
+        shopcenters = (
+            shopcenter
+                .select()
+        )
+        business = (
+            business_shop
+                .select()
+        )
+        profiles = (
+            Profile
+                .select()
+                .where(Profile.user_id == user_id
+                       )
+        )
+        clan = (
+            clans
+                .select()
+        )
+
+        profile = list(await manager.prefetch(profiles, shopcenters, business, clan))[0]
+    except IndexError:
+        profile = await peewee_async.create_object(Profile, user_id=user_id)
+
+    return profile
+
+
+def digits_recursive(nonneg):
+    digits = []
+    while nonneg:
+        digits += [nonneg % 10]
+        nonneg //= 10
+    return digits[::-1] or [0]
+
+
+def num_to_smile(num):
+    if num <= 10:
+        numbers = {0: '0⃣', 1: '1⃣', 2: '2⃣', 3: '3⃣', 4: '4⃣', 5: '5⃣', 6: '6⃣', 7: '7⃣', 8: '8⃣', 9: '9⃣', 10: '🔟'}
+        return numbers[num]
+    numbers = {0: '0⃣.', 1: '1⃣', 2: '2⃣', 3: '3⃣', 4: '4⃣', 5: '5⃣', 6: '6⃣', 7: '7⃣', 8: '8⃣', 9: '9⃣', 10: '🔟'}
+    digits = digits_recursive(num)
+    result = ""
+    for i in digits:
+        result += numbers[i]
+    return result
+
+
+def text_to_value(value, text):
+    value2 = 1000
+    if text == 'к' or text == 'k':
+        return int(value) * int(value2)
+    if text == 'кк' or text == 'kk':
+        return int(value) * (int(value2) ** 2)
+    if text == 'ккк' or text == 'kkk':
+        return int(value) * (int(value2) ** 3)
+    if text == 'кккк' or text == 'kkkk':
+        return int(value) * (int(value2) ** 4)
+    if text == 'ккккк' or text == 'kkkkk':
+        return int(value) * (int(value2) ** 5)
+    if text == 'кккккк' or text == 'kkkkkk':
+        return int(value) * (int(value2) ** 6)
+    if text == 'ккккккк' or text == 'kkkkkkk':
+        return int(value) * (int(value2) ** 7)
+    if text == 'кккккккк' or text == 'kkkkkkkk':
+        return int(value) * (int(value2) ** 8)
+    return int(value)
+
+
+def textify_value(value):
+    avalue = abs(value)
+    if avalue > 1000000000000000000000000000000000000000000000000000000000000000:
+        return "Too many Money!"
+    if avalue >= 1000000000000000000000000000000000:
+        return str(round(value / 1000000000000000000000000000000000, 2)) + " дец."
+    if avalue >= 1000000000000000000000000000000:
+        return str(round(value / 1000000000000000000000000000000, 2)) + " нон."
+    if avalue >= 1000000000000000000000000000:
+        return str(round(value / 1000000000000000000000000000, 2)) + " окт."
+    if avalue >= 1000000000000000000000000:
+        return str(round(value / 1000000000000000000000000, 2)) + " сптл."
+    if avalue >= 1000000000000000000000:
+        return str(round(value / 1000000000000000000000, 2)) + " скст."
+    if avalue >= 1000000000000000000:
+        return str(round(value / 1000000000000000000, 2)) + " квнт."
+    if avalue >= 1000000000000000:
+        return str(round(value / 1000000000000000, 2)) + " квдр."
+    if avalue >= 1000000000000:
+        return str(round(value / 1000000000000, 2)) + " трлн."
+    if avalue >= 1000000000:
+        return str(round(value / 1000000000, 2)) + " млрд."
+    if avalue >= 1000000:
+        return str(round(value / 1000000, 2)) + " млн."
+    if avalue >= 100000:
+        return str(round(value / 100000)) + "00 тыс."
+    if avalue >= 1000:
+        return str(round(value / 1000)) + " тыс."
+    return str(value)
+
+
+def humanize(value):
+    return "{:,}".format(round(value)).replace(",", ".")
+
+
+@plugin.on_startup()
+async def startup(update, env):
+    await schedule_api_task(get_btc)
+    return "GOON"
+
+
+@plugin.on_startswith_text("фермы")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    check = message.text.split(' ')
+    shopcenters = list(
+        await manager.execute(shopcenter.select().where(shopcenter.slot == "other").order_by(shopcenter.price)))
+    if len(check) < 3:
+        text = f"майнинг-фермы:\n"
+        for i in range(len(shopcenters)):
+            text += f"{'🔸' if profile.money < shopcenters[i].price else '🔹'} {num_to_smile(i + 1)}. {shopcenters[i].name} - {humanize(shopcenters[i].price)}${backsider+'&#12288;&#12288;👑 Нужен статус: ' +shopcenters[i].needstatus+backsider if not shopcenters[i].needstatus == '' else backsider }&#12288;Прибыль: нач. {shopcenters[i].moneymin/10}Ƀ/день\n"
+        return await env.reply(text + f'\nДля покупки используйте \"!фермы [номер] [кол-во]\"')
+    else:
+        limit = 100
+        privs = await priviligeshelper.getUserPriviliges(env, message.from_id)
+        if privs&shopcenters[int(check[1]) - 1].needstatus>0 or privs&priviligeshelper.USER_ADMIN>0:
+            pass
+        else:
+            if not shopcenters[int(check[1]) - 1].needstatus == '':
+                return await env.reply("вы не можете купить этот предмет. Т.к. ваш статус слишком мал для него")
+
+        if not check[1].isdigit():
+            return await env.reply('вы должны указать номер товара.')
+        if profile.other and profile.other_id != shopcenters[int(check[1]) - 1].id:
+            return await env.reply('У вас уже имеется данное имущество, продайте его, используя команду \"!продать\".')
+        if limit - (int(profile.btcamount) + int(check[2])) < 0:
+            data = limit - int(profile.btcamount)
+            return await env.reply(
+                f"Вы сможете купить еще {plural_form(data, ('ферма', 'фермы', 'ферм'))}" if data > 0 else 'Вы не можете больше приобретать данную ферму.')
+        if int(profile.money) < shopcenters[int(check[1]) - 1].price * int(check[2]):
+            return await env.reply(
+                f"У вас недостаточно средств. (не хватает {textify_value((shopcenters[int(check[1]) - 1].price * int(check[2])) - int(profile.money))}$)")
+        profile.money -= Decimal(shopcenters[int(check[1]) - 1].price * int(check[2]))
+        if profile.other and profile.other_id == shopcenters[int(check[1]) - 1].id:
+            profile.btcamount += int(check[2])
+        else:
+            profile.other = shopcenters[int(check[1]) - 1]
+            profile.btcamount = int(check[2])
+        await manager.update(profile)
+        return await env.reply(f"поздравляем вас с приобретением {shopcenters[int(check[1]) - 1].name}🎉")
+
+
+@plugin.on_startswith_text("бизнесы")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    check = message.text.split(' ')
+    shopcenters = list(await manager.execute(business_shop.select().order_by(business_shop.price)))
+    if len(check) < 3:
+        text = f"бизнесы:\n"
+        for i in range(len(shopcenters)):
+            text += f"{'🔸' if profile.money < shopcenters[i].price else '🔹'} {num_to_smile(i + 1)}. {shopcenters[i].name} - {humanize(shopcenters[i].price)}${backsider+'&#12288;&#12288;👑 Нужен статус: ' +shopcenters[i].needstatus+backsider if not shopcenters[i].needstatus == '' else backsider }&#12288;Прибыль: нач. {humanize(shopcenters[i].pay)}$\n"
+        return await env.reply(text + '\nДля покупки используйте \"!бизнесы [номер] [кол-во]\"')
+    else:
+        privs = await priviligeshelper.getUserPriviliges(env, message.from_id)
+        if privs & shopcenters[int(check[1]) - 1].needstatus > 0 or privs & priviligeshelper.USER_ADMIN > 0:
+            pass
+        else:
+            if not shopcenters[int(check[1]) - 1].needstatus == '':
+                return await env.reply("вы не можете купить этот предмет. Т.к. ваш статус слишком мал для него")
+        if not check[1].isdigit():
+            return await env.reply('вы должны указать номер товара.')
+        if profile.business and profile.business_id != shopcenters[int(check[1]) - 1].id:
+            return await env.reply(
+                'У вас уже имеется данное имущество, продайте его, используя команду \"!продать\".')
+        if int(shopcenters[int(check[1]) - 1].limit) - (int(profile.business_amount) + int(check[2])) < 0:
+            data = int(shopcenters[int(check[1]) - 1].limit) - int(profile.business_amount)
+            return await env.reply(
+                f"Вы сможете купить еще {plural_form(data, ('бизнес', 'бизнеса', 'бизнесы'))}" if data > 0 else 'Вы не можете больше приобретать данный бизнес.')
+        if int(profile.money) < shopcenters[int(check[1]) - 1].price * int(check[2]):
+            return await env.reply(
+                f"У вас недостаточно средств. (не хватает {textify_value((shopcenters[int(check[1]) - 1].price * int(check[2])) - int(profile.money))} $)")
+        profile.money -= Decimal(shopcenters[int(check[1]) - 1].price * int(check[2]))
+        if profile.business and profile.business_id == shopcenters[int(check[1]) - 1].id:
+            profile.business_amount += int(check[2])
+            vk_message = f'Вы приобрели еще {check[2]} {shopcenters[int(check[1]) - 1].name}.'
+        else:
+            profile.business = shopcenters[int(check[1]) - 1]
+            profile.business_amount = int(check[2])
+            profile.business_materials = 0
+            vk_message = f"поздравляем вас с приобретением бизнеса {shopcenters[int(check[1]) - 1].name}!\nСтатистика бизнеса - !бизнес статистика\nПриобрести материалы - !бизнес материалы"
+        await manager.update(profile)
+        return await env.reply(vk_message)
+
+
+@plugin.on_startswith_text("профиль")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    puid = message.from_id
+    nextline = '\n'
+    if profile.money < 0:
+        profile.money = 0
+        await manager.update(profile)
+    if puid:
+        c = await get_or_create_profile(puid)
+        if not c.id:
+            return await env.reply("запрашиваемый вами пользователь не найден.")
+        text = f"профиль пользователя:\n🆔ID: {c.id}\n💰Баланс: {humanize(c.money)}$ ({textify_value(round(c.money))})\n{f'💳Банковский счет: {humanize(c.bankmoney)}$ ({textify_value(round(c.bankmoney))}){nextline}' if c.bankmoney > 0 else ''}💱Биткоинов: {humanize(c.btc)}Ƀ\n💹Курс биткоина:{humanize(int(plugin.bitcoin_price))}$\n👑Рейтинг: {c.rg}\n"
+        if profile.clan:
+            text += f"🌍Клан: {profile.clan.name}\n"
+        if c.house or c.car or c.airplane or c.helicopter or c.apartment or c.mobile or c.other or c.business or c.dress:
+            text += "🏡Ваше имущество:\n"
+        if c.house:
+            text += f"&#12288;🏠Дом: {c.house.name} (🆔: {c.house_id})\n"
+            if c.car:
+                text += f"&#12288;🚗Автомобиль: {c.car.name} (🆔: {c.car_id})\n"
+            if c.apartment:
+                text += f"&#12288;🌇Квартира: {c.apartment.name} (🆔: {c.apartment_id})\n"
+            if c.airplane:
+                text += f"&#12288;🛩Самолет: {c.airplane.name} (🆔: {c.airplane_id})\n"
+            if c.helicopter:
+                text += f"&#12288;🚁Вертолет: {c.helicopter.name} (🆔: {c.helicopter_id})\n"
+            if c.mobile:
+                text += f"&#12288;📱Телефон: {c.mobile.name} (🆔: {c.mobile_id})\n"
+            if c.other:
+                text += f"&#12288;🔋Майнер: {c.other.name} (🆔: {c.other_id}/Кол-во: {c.btcamount})\n"
+            if c.business:
+                text += f'&#12288;🏦Бизнес: {c.business.name} (🆔: {c.business.id})\n'
+            if c.dress:
+                text += f"&#12288;📱🌇Одежда: {c.dress.name} (🆔: {c.dress_id})\n"
+            text += f"💾 Дата регистрации: {c.datareg}"
+            return await env.reply(text)
+        text = f"ваш профиль:\n🆔ID: {profile.id}\n💰Баланс: {humanize(profile.money)}$ ({textify_value(round(profile.money))})\n{f'💳Банковский счет: {humanize(profile.bankmoney)}$ ({textify_value(round(profile.bankmoney))}){nextline}' if profile.bankmoney > 0 else ''}💱Биткоинов: {humanize(profile.btc)}Ƀ\n💹Курс биткоина:{humanize(int(plugin.bitcoin_price))}$\n👑Рейтинг: {profile.rg}\n"
+        if profile.clan:
+            text += f"🌍Клан: {profile.clan.name}\n"
+        if profile.house or profile.car or profile.airplane or profile.helicopter or profile.apartment or profile.mobile or profile.other or profile.business:
+            text += "🏡Ваше имущество:\n"
+        if profile.house:
+            text += f"&#12288;🏠Дом: {profile.house.name} (🆔: {profile.house_id})\n"
+        if profile.car:
+            text += f"&#12288;🚗Автомобиль: {profile.car.name} (🆔: {profile.car_id})\n"
+        if profile.apartment:
+            text += f"&#12288;🌇Квартира: {profile.apartment.name} (🆔: {profile.apartment_id})\n"
+        if profile.airplane:
+            text += f"&#12288;🛩Самолет: {profile.airplane.name} (🆔: {profile.airplane_id})\n"
+        if profile.helicopter:
+            text += f"&#12288;🚁Вертолет: {profile.helicopter.name} (🆔: {profile.helicopter_id})\n"
+        if profile.mobile:
+            text += f"&#12288;📱Телефон: {profile.mobile.name} (🆔: {profile.mobile_id})\n"
+        if profile.other:
+            text += f"&#12288;🔋Биткоин ферма: {profile.other.name} (🆔: {profile.other_id}/Кол-во: {profile.btcamount})\n"
+        if profile.business:
+            text += f'&#12288;🏦Бизнес: {profile.business.name} (🆔: {profile.business.id})\n'
+        text += f"💾 Дата регистрации: {profile.datareg}"
+        return await env.reply(text)
+
+
+@plugin.on_startswith_text("товары")
+async def on_message(message, attachments, env):
+    data = f'''доступные товары:
+🚙Транспорт:
+&#12288;🚗Машины
+&#12288;🛩Самолеты
+&#12288;🚁Вертолеты
+
+🏘Недвижимость:
+&#12288;🏠Дома
+&#12288;🌇Квартиры
+
+📱Телефоны
+&#12288;🎀Одежда
+
+🏦Бизнесы
+
+🔋Фермы
+
+👑Рейтинг [кол-во] -  25 млн. $
+
+Для покупки используйте "![категория] [номер]".
+Например: "!самолеты 5"'''
+    return await env.reply(data)
+
+
+@plugin.on_startswith_text("машины")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    check = message.text.split(' ')
+    shopcenters = list(await manager.execute(
+        shopcenter.select().where(shopcenter.slot == "car").order_by(shopcenter.price)))
+    if len(check) < 2:
+        text = f"каталог автомобилей:\n"
+        for i in range(len(shopcenters)):
+            text += f"{'🔸' if profile.money < shopcenters[i].price else '🔹'} {num_to_smile(i + 1)}. {shopcenters[i].name} - {humanize(shopcenters[i].price)}${backsider+'&#12288;&#12288;👑 Нужен статус: ' +shopcenters[i].needstatus+backsider if not shopcenters[i].needstatus == '' else backsider }"
+        return await env.reply(text + f'\nДля покупки используйте \"!машины [номер] [кол-во]\"')
+    else:
+        privs = await priviligeshelper.getUserPriviliges(env, message.from_id)
+        if privs & shopcenters[int(check[1]) - 1].needstatus > 0 or privs & priviligeshelper.USER_ADMIN > 0:
+            pass
+        else:
+            if not shopcenters[int(check[1]) - 1].needstatus == '':
+                return await env.reply("вы не можете купить этот предмет. Т.к. ваш статус слишком мал для него")
+        if profile.car:
+            return await env.reply(
+                'У вас уже имеется данное имущество, продайте его, используя команду \"!продать\".')
+        if not check[1].isdigit():
+            return await env.reply('вы должны указать номер товара.')
+        if int(profile.money) < shopcenters[int(check[1]) - 1].price:
+            return await env.reply("у вас недостаточно средств.")
+        profile.money -= shopcenters[int(check[1]) - 1].price
+        profile.car = shopcenters[int(check[1]) - 1]
+        await manager.update(profile)
+        return await env.reply(f"поздравляем вас с приобретением {shopcenters[int(check[1]) - 1].name}🎉")
+
+
+@plugin.on_startswith_text("одежда")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    check = message.text.split(' ')
+    shopcenters = list(await manager.execute(
+        shopcenter.select().where(shopcenter.slot == "dress").order_by(shopcenter.price)))
+    if len(check) < 2:
+        text = f"каталог одежды:\n"
+        for i in range(len(shopcenters)):
+            text += f"{'🔸' if profile.money < shopcenters[i].price else '🔹'} {num_to_smile(i + 1)}. {shopcenters[i].name} - {humanize(shopcenters[i].price)}${backsider+'&#12288;&#12288;👑 Нужен статус: ' +shopcenters[i].needstatus+backsider if not shopcenters[i].needstatus == '' else backsider }"
+        return await env.reply(text + f'\nДля покупки используйте \"!одежда [номер] [кол-во]\"')
+    else:
+        privs = await priviligeshelper.getUserPriviliges(env, message.from_id)
+        if privs & shopcenters[int(check[1]) - 1].needstatus > 0 or privs & priviligeshelper.USER_ADMIN > 0:
+            pass
+        else:
+            if not shopcenters[int(check[1]) - 1].needstatus == '':
+                return await env.reply("вы не можете купить этот предмет. Т.к. ваш статус слишком мал для него")
+        if profile.car:
+            return await env.reply(
+                'У вас уже имеется данное имущество, продайте его, используя команду \"!продать\".')
+        if not check[1].isdigit():
+            return await env.reply('вы должны указать номер товара.')
+        if int(profile.money) < shopcenters[int(check[1]) - 1].price:
+            return await env.reply("у вас недостаточно средств.")
+        profile.money -= shopcenters[int(check[1]) - 1].price
+        profile.car = shopcenters[int(check[1]) - 1]
+        await manager.update(profile)
+        return await env.reply(f"поздравляем вас с приобретением {shopcenters[int(check[1]) - 1].name}🎉")
+
+
+@plugin.on_startswith_text("самолеты", "самолёты")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    check = message.text.split(' ')
+    shopcenters = list(await manager.execute(
+        shopcenter.select().where(shopcenter.slot == "airplane").order_by(shopcenter.price)))
+    if len(check) < 2:
+        text = f"каталог самолетов:\n"
+        for i in range(len(shopcenters)):
+            text += f"{'🔸' if profile.money < shopcenters[i].price else '🔹'} {num_to_smile(i + 1)}. {shopcenters[i].name} - {humanize(shopcenters[i].price)}${backsider+'&#12288;&#12288;👑 Нужен статус: ' +shopcenters[i].needstatus+backsider if not shopcenters[i].needstatus == '' else backsider }"
+        return await env.reply(text + f'\nДля покупки используйте \"!самолеты [номер] [кол-во]\"')
+    else:
+        privs = await priviligeshelper.getUserPriviliges(env, message.from_id)
+        if privs & shopcenters[int(check[1]) - 1].needstatus > 0 or privs & priviligeshelper.USER_ADMIN > 0:
+            pass
+        else:
+            if not shopcenters[int(check[1]) - 1].needstatus == '':
+                return await env.reply("вы не можете купить этот предмет. Т.к. ваш статус слишком мал для него")
+        if profile.airplane:
+            return await env.reply(
+                'У вас уже имеется данное имущество, продайте его, используя команду \"!продать\".')
+        if not check[1].isdigit():
+            return await env.reply('вы должны указать номер товара.')
+        if int(profile.money) < shopcenters[int(check[1]) - 1].price:
+            return await env.reply("у вас недостаточно средств.")
+        profile.money -= shopcenters[int(check[1]) - 1].price
+        profile.airplane = shopcenters[int(check[1]) - 1]
+        await manager.update(profile)
+        return await env.reply(f"поздравляем вас с приобретением {shopcenters[int(check[1]) - 1].name}🎉")
+
+
+@plugin.on_startswith_text("вертолеты", "вертолёты")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    check = message.text.split(' ')
+    shopcenters = list(await manager.execute(
+        shopcenter.select().where(shopcenter.slot == "helicopter").order_by(shopcenter.price)))
+    if len(check) < 2:
+        text = f"каталог вертолетов:\n"
+        for i in range(len(shopcenters)):
+            text += f"{'🔸' if profile.money < shopcenters[i].price else '🔹'} {num_to_smile(i + 1)}. {shopcenters[i].name} - {humanize(shopcenters[i].price)}${backsider+'&#12288;&#12288;👑 Нужен статус: ' +shopcenters[i].needstatus+backsider if not shopcenters[i].needstatus == '' else backsider }"
+        return await env.reply(text + f'\nДля покупки используйте \"!вертолеты [номер] [кол-во]\"')
+    else:
+        privs = await priviligeshelper.getUserPriviliges(env, message.from_id)
+        if privs & shopcenters[int(check[1]) - 1].needstatus > 0 or privs & priviligeshelper.USER_ADMIN > 0:
+            pass
+        else:
+            if not shopcenters[int(check[1]) - 1].needstatus == '':
+                return await env.reply("вы не можете купить этот предмет. Т.к. ваш статус слишком мал для него")
+        if profile.helicopter:
+            return await env.reply(
+                'У вас уже имеется данное имущество, продайте его, используя команду \"!продать\".')
+        if not check[1].isdigit():
+            return await env.reply('вы должны указать номер товара.')
+        if int(profile.money) < shopcenters[int(check[1]) - 1].price:
+            return await env.reply("у вас недостаточно средств.")
+        profile.money -= shopcenters[int(check[1]) - 1].price
+        profile.helicopter = shopcenters[int(check[1]) - 1]
+        await manager.update(profile)
+        return await env.reply(f"поздравляем вас с приобретением {shopcenters[int(check[1]) - 1].name}🎉")
+
+
+@plugin.on_startswith_text("дома")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    check = message.text.split(' ')
+    shopcenters = list(await manager.execute(
+        shopcenter.select().where(shopcenter.slot == "house").order_by(shopcenter.price)))
+    if len(check) < 2:
+        text = f"недвижимость (дома):\n"
+        for i in range(len(shopcenters)):
+            text += f"{'🔸' if profile.money < shopcenters[i].price else '🔹'} {num_to_smile(i + 1)}. {shopcenters[i].name} - {humanize(shopcenters[i].price)}${backsider+'&#12288;&#12288;👑 Нужен статус: ' +shopcenters[i].needstatus+backsider if not shopcenters[i].needstatus == '' else backsider }"
+        return await env.reply(text + f'\nДля покупки используйте \"!дома [номер] [кол-во]\"')
+    else:
+        privs = await priviligeshelper.getUserPriviliges(env, message.from_id)
+        if privs & shopcenters[int(check[1]) - 1].needstatus > 0 or privs & priviligeshelper.USER_ADMIN > 0:
+            pass
+        else:
+            if not shopcenters[int(check[1]) - 1].needstatus == '':
+                return await env.reply("вы не можете купить этот предмет. Т.к. ваш статус слишком мал для него")
+        if profile.house:
+            return await env.reply('У вас уже имеется дом, продайте его, используя команду \"!продать\".')
+        if not check[1].isdigit():
+            return await env.reply('вы должны указать номер товара.')
+        if int(profile.money) < shopcenters[int(check[1]) - 1].price:
+            return await env.reply("у вас недостаточно средств.")
+        profile.money -= shopcenters[int(check[1]) - 1].price
+        profile.house = shopcenters[int(check[1]) - 1]
+        await manager.update(profile)
+        return await env.reply(f"поздравляем вас с приобретением {shopcenters[int(check[1]) - 1].name}🎉")
+
+
+@plugin.on_startswith_text("квартиры")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    check = message.text.split(' ')
+    shopcenters = list(await manager.execute(
+        shopcenter.select().where(shopcenter.slot == "apartment").order_by(shopcenter.price)))
+    if len(check) < 2:
+        text = f"недвижимость (квартиры):\n"
+        for i in range(len(shopcenters)):
+            text += f"{'🔸' if profile.money < shopcenters[i].price else '🔹'} {num_to_smile(i + 1)}. {shopcenters[i].name} - {humanize(shopcenters[i].price)}${backsider+'&#12288;&#12288;👑 Нужен статус: ' +shopcenters[i].needstatus+backsider if not shopcenters[i].needstatus == '' else backsider }"
+        return await env.reply(text + f'\nДля покупки используйте \"!квартиры [номер] [кол-во]\"')
+    else:
+        privs = await priviligeshelper.getUserPriviliges(env, message.from_id)
+        if privs & shopcenters[int(check[1]) - 1].needstatus > 0 or privs & priviligeshelper.USER_ADMIN > 0:
+            pass
+        else:
+            if not shopcenters[int(check[1]) - 1].needstatus == '':
+                return await env.reply("вы не можете купить этот предмет. Т.к. ваш статус слишком мал для него")
+        if profile.apartment:
+            return await env.reply(
+                'У вас уже имеется данное имущество, продайте его, используя команду \"!продать\".')
+        if not check[1].isdigit():
+            return await env.reply('вы должны указать номер товара.')
+        if int(profile.money) < shopcenters[int(check[1]) - 1].price:
+            return await env.reply("у вас недостаточно средств.")
+        profile.money -= shopcenters[int(check[1]) - 1].price
+        profile.apartment = shopcenters[int(check[1]) - 1]
+        await manager.update(profile)
+        return await env.reply(f"поздравляем вас с приобретением {shopcenters[int(check[1]) - 1].name}🎉")
+
+
+@plugin.on_startswith_text("телефоны")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    check = message.text.split(' ')
+    shopcenters = list(await manager.execute(
+        shopcenter.select().where(shopcenter.slot == "mobile").order_by(shopcenter.price)))
+    if len(check) < 2:
+        text = f"каталог телефонов:\n"
+        for i in range(len(shopcenters)):
+            text += f"{'🔸' if profile.money < shopcenters[i].price else '🔹'} {num_to_smile(i + 1)}. {shopcenters[i].name} - {humanize(shopcenters[i].price)}${backsider+'&#12288;&#12288;👑 Нужен статус: ' +shopcenters[i].needstatus+backsider if not shopcenters[i].needstatus == '' else backsider }"
+        return await env.reply(text + f'\nДля покупки используйте \"!телефоны [номер] [кол-во]\"')
+    else:
+        privs = await priviligeshelper.getUserPriviliges(env, message.from_id)
+        if privs & shopcenters[int(check[1]) - 1].needstatus > 0 or privs & priviligeshelper.USER_ADMIN > 0:
+            pass
+        else:
+            if not shopcenters[int(check[1]) - 1].needstatus == '':
+                return await env.reply("вы не можете купить этот предмет. Т.к. ваш статус слишком мал для него")
+        if profile.mobile:
+            return await env.reply(
+                'У вас уже имеется данное имущество, продайте его, используя команду \"!продать\".')
+        if not check[1].isdigit():
+            return await env.reply('вы должны указать номер товара.')
+        if int(profile.money) < shopcenters[int(check[1]) - 1].price:
+            return await env.reply("у вас недостаточно средств.")
+        profile.money -= shopcenters[int(check[1]) - 1].price
+        profile.mobile = shopcenters[int(check[1]) - 1]
+        await manager.update(profile)
+        return await env.reply(f"поздравляем вас с приобретением {shopcenters[int(check[1]) - 1].name}🎉")
+
+
+@plugin.on_startswith_text("продать")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    if len(env['args']) < 1:
+        return await env.reply(
+            "Как надо: продать [предмет(дом, автомобиль, майнер, бизнес и т.д)]")
+
+    slot = env['args'][0]
+
+    if slot.lower() not in (
+            "дом", "автомобиль", "вертолет", "квартира", "самолет", "телефон", "майнер", 'бизнес'):
+        return await env.reply(
+            "Доступные слоты для продажи: дом, автомобиль, майнер, самолет, телефон, бизнес, вертолет, квартира.")
+    amount = 1
+    data = None
+    d_type = 0
+    if slot.lower() == "дом":
+        data = profile.house_id
+        profile.house_id = None
+    if slot.lower() == "автомобиль":
+        data = profile.car_id
+        profile.car_id = None
+    if slot.lower() == "вертолет":
+        data = profile.helicopter_id
+        profile.helicopter_id = None
+    if slot.lower() == "квартира":
+        data = profile.apartment_id
+        profile.apartment_id = None
+    if slot.lower() == "самолет":
+        data = profile.airplane_id
+        profile.airplane_id = None
+    if slot.lower() == "телефон":
+        data = profile.mobile_id
+        profile.mobile_id = None
+    if slot.lower() == "одежда":
+        data = profile.dress_id
+        profile.dress_id = None
+    if slot.lower() == "майнер":
+        data = profile.other_id
+        profile.other_id = None
+        amount = profile.btcamount
+        profile.btcamount = 0
+    if slot.lower() == "бизнес":
+        data = profile.business_id
+        d_type = 1
+        profile.business = None
+        amount = profile.business_amount
+        profile.business_amount = 0
+    try:
+        if data is None:
+            return await env.reply("У вас нет данного предмета")
+    except(TypeError):
+        return await env.reply("У вас нет данного предмета")
+    if d_type == 1:
+        shopcenters = await manager.get(business_shop, business_shop.id == data)
+    else:
+        shopcenters = await manager.get(shopcenter, shopcenter.id == data)
+    pr = (shopcenters.price * amount) // 1.5
+    profile.money += int(pr)
+    await manager.update(profile)
+    return await env.reply(f"Вы продали предмет за {humanize(pr)}$.")
+
+
+@plugin.on_startswith_text("биткоин купить")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    if len(env['args']) < 1 or not env['args'][0].isdigit():
+        return await env.reply("Как надо покупать: биткоин купить [кол-во]")
+    amount = int(env['args'][0])
+
+    if int(profile.money) < int(plugin.bitcoin_price) * int(amount):
+        return await env.reply("У вас недостаточно средств для покупки Биткоинов.")
+    if int(amount) <= 0:
+        return await env.reply('Количество должно быть больше нуля.')
+    profile.money -= int(plugin.bitcoin_price) * int(amount)
+    profile.btc += int(amount)
+    await manager.update(profile)
+    return await env.reply(f"Вы приобрели {int(amount)}Ƀ за {humanize(int(plugin.bitcoin_price) * int(amount))}$.")
+
+
+@plugin.on_startswith_text("биткоин продать")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    if len(env['args']) < 1 or not env['args'][0].isdigit():
+        return await env.reply("Как надо покупать: биткоин продать[кол-во]")
+    amount = int(env['args'][0])
+
+    if amount == "всё" or amount == "все":
+        amount = profile.btc
+    if int(amount) <= 0:
+        return await env.reply('Количество должно быть больше нуля.')
+    if profile.btc < int(amount):
+        return await env.reply("На вашем счету недостаточно биткоинов.")
+    profile.money += int(plugin.bitcoin_price) * int(amount)
+    profile.btc -= int(amount)
+    await manager.update(profile)
+    return await env.reply(f"Вы продали {int(amount)}Ƀ за {humanize(int(plugin.bitcoin_price) * int(amount))}$.")
+
+
+@plugin.on_startswith_text("передать")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    if len(env['args']) < 2:
+        return await env.reply("Как надо передавать: передать [id] [кол-во]")
+    amount = int(env['args'][1])
+    user_idd = env['args'][0]
+
+    if not await get_or_none(Profile, id=user_idd):
+        return await env.reply("Пользователя с данным ID не существует")
+    if int(user_idd) == profile.id:
+        return await env.reply("Передавать самому себе бессмысленно.")
+    c, cr = await manager.get_or_create(Profile, id=user_idd)
+    data = c.user_id
+    if amount == "всё" or amount == "все":
+        amount = profile.money
+        result = amount
+    else:
+        # value = re.findall(r'\d+', amount)
+        # text = re.sub(r'[^\w\s]+|[\d]+', r'', amount).strip()
+        # result = text_to_value(value[0], text)
+        result = amount
+    if int(result) < 1:
+        return await env.reply('Число должно быть больше 0.')
+    if message.from_id != env.eenv['admins'][0] and int(profile.money) < result:
+        return await env.reply("На вашем счете недостаточно средств.")
+    c.money += result
+    profile.money -= result if message.from_id != env.eenv['admins'][0] else 0
+    await env.reply(f"Вы передали пользователю сумму в размере {humanize(result)}$.")
+    await manager.update(profile)
+    return await manager.update(c)
+
+
+@plugin.on_startswith_text("биткоин передать")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    if len(env['args']) < 2:
+        return await env.reply("Как надо передавать биткоины: передать [id] [кол-во]")
+    amount = int(env['args'][1])
+    user_idd = env['args'][0]
+
+    if not await get_or_none(Profile, id=user_idd):
+        return await env.reply("Пользователя с данным ID не существует")
+    if int(user_idd) == profile.id:
+        return await env.reply("Передавать самому себе бессмысленно.")
+    c, cr = await manager.get_or_create(Profile, id=user_idd)
+    data = c.user_id
+    if amount == "всё" or amount == "все":
+        amount = profile.btc
+    if int(amount) < 1:
+        return await env.reply('Число должно быть больше 0.')
+    if int(profile.btc) < int(amount):
+        return await env.reply("На вашем счете недостаточно биткоинов.")
+    c.btc += int(amount)
+    profile.btc -= int(amount)
+    await env.reply(f"Вы передали пользователю {int(amount)}₿")
+    await manager.update(profile)
+    return await manager.update(c)
+
+
+@plugin.on_startswith_text("рейтинг")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    if len(env['args']) < 1:
+        return await env.reply(f"Ваш рейтинг - {profile.rg}👑")
+
+    if not env['args'][0].isdigit():
+        return await env.reply("Ох, а можно так не шутить?!")
+
+    amount = env['args'][0]
+    if profile.money < int(amount) * 25000000:
+        return await env.reply(f"Недостаточно средств.")
+    profile.money -= int(amount) * 25000000
+    profile.rg += int(amount)
+    await manager.update(profile)
+    return await env.reply(f"Вы приобрели {amount} очков рейтинга за {humanize(int(amount) * 25000000)}$")
+
+
+@plugin.on_startswith_text("список богачей")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    top = list(await manager.execute(Profile.select().limit(200).order_by(
+        (Profile.rg * int(25000000) + Profile.money + Profile.bankmoney).desc())))
+    data = []
+
+    for u in top:
+        privs = await priviligeshelper.getUserPriviliges(env, u.user_id)
+        if privs&priviligeshelper.USER_ADMIN>0 or privs&priviligeshelper.USER_MODERATOR>0:
+            continue
+        data.append(
+            {"id": u.user_id, "rg": u.rg, "u_name": u.profile_name, "money": u.money, "bankmoney": u.bankmoney}
+        )
+
+    mesto = list(z['id'] for z in data)
+    text = "рейтинг самых богатых игроков:\n"
+    for i in enumerate(data[:10], start=1):
+        name = await parse_user_name(env, i[1]['id'])
+        num = num_to_smile(i[0])
+        text += f"{num}. @id{i[1]['id']} ({name}) | 👑{i[1]['rg']} | {textify_value(int(i[1]['money'] + i[1]['bankmoney']))}$\n"
+    if message.from_id in mesto and mesto.index(int(message.from_id)) + 1 > 10:
+        name = await parse_user_name(env, message.from_id)
+        num = num_to_smile(mesto.index(int(message.from_id)) + 1)
+        text += f"----------------------------\n{num}. {name} | 👑{profile.rg} | {textify_value(int(profile.money + profile.bankmoney))}$"
+    return await env.reply(text)
+
+
+@plugin.on_startswith_text("банк баланс")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    if profile.bankmoney <= 0:
+        return await env.reply("Вы не вкладывали в банк.")
+    a = time.time()
+    b = time.mktime(profile.last_bank_payout.timetuple()) if profile.last_bank_payout else time.time()
+    res = (a - b) // 86400
+    data = (profile.bankmoney * 0.07) * res
+    return await env.reply(
+        f"💵Сейчас в банке {textify_value(profile.bankmoney)}$\n{f'💸Прибыль с процентов: {humanize(data)}$' if res >= 1 else ''}")
+
+
+@plugin.on_startswith_text("банк вложить")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    if len(env['args']) < 1:
+        return await env.reply(f"А сколько вы хотите вложить в банк?")
+
+    amount = env['args'][0]
+    if amount == "всё" or amount == "все":
+        amount = profile.money
+        result = amount - 100
+    else:
+        value = re.findall(r'\d+', amount)
+        text = re.sub(r'[^\w\s]+|[\d]+', r'', amount).strip()
+        result = text_to_value(value[0], text)
+    if int(profile.money) < result:
+        return await env.reply("На вашем счете недостаточно средств.")
+    if int(profile.money) <= 0:
+        return await env.reply('На вашем счету отрицательный счет.')
+    if int(result) < 1:
+        return await env.reply('Число должно быть больше 0.')
+    a = time.time()
+    b = time.mktime(profile.last_bank_payout.timetuple()) if profile.last_bank_payout else time.time()
+    res = (a - b) // 86400
+    profile.bankmoney += (profile.bankmoney * 0.07) * res if res >= 1 else 0
+    profile.bankmoney += int(result)
+    profile.money -= int(result)
+    profile.last_bank_payout = datetime.datetime.now()
+    await manager.update(profile)
+    return await env.reply(
+        f"💵Вы вложили +{humanize(result)}$.\nВ течении каждого дня с момента вложения/снятия денег, вам будут капать проценты в размере 7% от суммы, вложенной в банк.")
+
+
+@plugin.on_startswith_text("банк снять")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    if len(env['args']) < 1:
+        return await env.reply(f"Укажите количество денег, которые вы хотите снять.")
+
+    amount = env['args'][0]
+    a = time.time()
+    b = time.mktime(profile.last_bank_payout.timetuple()) if profile.last_bank_payout else time.time()
+    res = (a - b) // 86400
+    plus_money = (profile.bankmoney * 0.07) * res if res >= 1 else 0
+    profile.bankmoney += (profile.bankmoney * 0.07) * res if res >= 1 else 0
+    if amount == "всё" or amount == "все":
+        amount = profile.bankmoney
+        result = amount
+    else:
+        value = re.findall(r'\d+', amount)
+        text = re.sub(r'[^\w\s]+|[\d]+', r'', amount).strip()
+        result = text_to_value(value[0], text)
+    if int(result) < 1:
+        return await env.reply('Число должно быть больше 0.')
+    if profile.bankmoney < int(result):
+        return await env.reply("На вашем банковском счету нет столько денег.")
+    profile.bankmoney -= int(result)
+    profile.money += int(result)
+    profile.last_bank_payout = datetime.datetime.now()
+    await manager.update(profile)
+    sustrdplus = f'Прибыль с процентов {humanize(plus_money)}' if plus_money > 0 else ""
+    return await env.reply(f"💵Вы сняли с вашего банковского счета {humanize(result)}$\n{sustrdplus}")
+
+
+@plugin.on_startswith_text("майнер снять")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    if not profile.other:
+        return await env.reply(f"у вас нет фермы, купить её можно в магазине")
+    if profile.minercheck == 0:
+        return await env.reply("введите '!майнер' , чтобы запустить майнер")
+    if not profile.last_btc_payout:
+        a = datetime.datetime.now().minute
+        profile.last_btc_payout = datetime.datetime.now() + timedelta(minutes=-a)
+        await manager.update(profile)
+    a = time.time()
+    b = time.mktime(profile.last_btc_payout.timetuple())
+    res = (a - b) // 86400
+    if (profile.other.moneymin / 10) * res <= 0:
+        return await env.reply("Вы еще ничего не заработали")
+    profile.btc += (profile.other.moneymin / 10) * res * profile.btcamount
+    profile.tt = time.time()
+    profile.minercheck = 0
+    profile.last_btc_payout = datetime.datetime.now()
+    await manager.update(profile)
+    return await env.reply(
+        f"Вы заработали {round((profile.other.moneymin / 10) * res * profile.btcamount)}₿.\nНе забудьте включить майнер!")
+
+
+@plugin.on_startswith_text("майнер")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    if not profile.other:
+        return await env.reply(f"у вас нет фермы, купить её можно в магазине")
+    if profile.minercheck == 0:
+        a = datetime.datetime.now().minute
+        profile.last_btc_payout = datetime.datetime.now() + timedelta(minutes=-a)
+        profile.minercheck = 1
+        await manager.update(profile)
+        await env.reply("Майнер запущен.")
+    data = "🔋Статистика биткоин фермы:\n"
+    a = time.time()
+    b = time.mktime(profile.last_btc_payout.timetuple())
+    d = str(datetime.datetime.now() - profile.last_btc_payout).split(':')
+    res = (a - b) // 86400
+    data += f"♻Ферма: {profile.other.name} (кол-во: {profile.btcamount})\n"
+    data += f"⌛Время работы: {d[0]}hours, {d[1]}minutes\n"
+    data += f"📈 Скорость работы: {(profile.other.moneymin / 10) * profile.btcamount}₿/день\n"
+    data += f"💰 Текущий заработок: {round((profile.other.moneymin / 10) * res * profile.btcamount)}₿\n"
+    return await env.reply(data)
+
+
+@plugin.on_startswith_text("бизнес статистика")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    if not profile.business:
+        return await env.reply(f"для того, чтобы использовать бизнес, вам нужно его приобрести.")
+    if profile.business_start == 0:
+        a = datetime.datetime.now().minute
+        profile.last_bussiness_payout = datetime.datetime.now() + timedelta(minutes=-a)
+        profile.business_start = 1
+        await manager.update(profile)
+        await env.reply("Работа бизнеса запущена.")
+    data = "💻Статистика работы бизнеса:\n"
+    a = time.time()
+    b = time.mktime(profile.last_bussiness_payout.timetuple())
+    d = str(datetime.datetime.now() - profile.last_bussiness_payout).split(':')
+    res = (a - b) // 86400
+    if profile.business_materials == 0 or profile.business_materials + 1 < res:
+        return await env.reply(
+            'Количество материалов закончилось, вам стоит приобрести новые.\nНе забывайте пополнять материалы по мере необходимости, иначе весь ваш заработок пропадет.\nЧтобы их пополнить, введите !бизнес материалы [кол-во]')
+    profile.business_materials -= int(res)
+    await manager.update(profile)
+    data += f"🏪Бизнес: {profile.business.name} (кол-во: {profile.business_amount})\n"
+    data += f'👨Количество рабочих: {profile.business.max_works * profile.business_amount}\n'
+    data += f'🎫Налог: {humanize(profile.business.tax * res)}$\n'
+    data += f'📦Материалов хватит на {int(profile.business_materials)}дн..\n'
+    data += f"⌛Время работы: {d[0]}hours, {d[1]}minutes\n"
+    data += f"📈Скорость работы: {humanize(profile.business.pay * profile.business_amount)}$/1дн.\n"
+    data += f"💰Текущий заработок: {humanize(profile.business.pay * profile.business_amount * res)}$\n\n"
+    data += 'Для того, чтобы забрать заработок, введите !бизнес снять\nЧтобы пополнить материалы, введите !бизнес материалы [кол-во]'
+    return await env.reply(data)
+
+
+# бизнес снять
+@plugin.on_startswith_text("бизнес снять")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    if not profile.business:
+        return await env.reply(f"для того, чтобы использовать бизнес, вам нужно его приобрести.")
+    if profile.business_start == 0:
+        return await env.reply("введите '!бизнес статистика', чтобы возобновить работу бизнеса.")
+    if not profile.last_bussiness_payout:
+        a = datetime.datetime.now().minute
+        profile.last_bussiness_payout = datetime.datetime.now() + timedelta(minutes=-a)
+        await manager.update(profile)
+    a = time.time()
+    b = time.mktime(profile.last_bussiness_payout.timetuple())
+    res = (a - b) // 86400
+    if profile.business_materials + 1 < res:
+        return await env.reply(
+            'Количество материалов закончилось, весь ваш заработок забрала мафия.\nВ следующий раз следите за количеством материалов и вовремя пополняйте их.\nЧтобы их пополнить, введите #бизнес материалы [кол-во]')
+    if profile.business.pay * res <= 0:
+        return await env.reply("Вы еще ничего не заработали :c")
+    pay = random.randint(1000, 2000)
+    mafia = random.randint(2000, 4000)
+    tax = (profile.business.tax * profile.business_amount * res) + (
+            pay * profile.business.max_works * profile.business_amount * profile.business.works_pay_type) + profile.business.mafia_type * mafia
+    profile.business_materials -= int(res)
+    profile.money += Decimal(profile.business.pay * res * profile.business_amount) - Decimal(tax)
+    profile.tt = time.time()
+    profile.minercheck = 0
+    a = datetime.datetime.now().minute
+    profile.last_bussiness_payout = datetime.datetime.now() + timedelta(minutes=-a)
+    await manager.update(profile)
+    return await env.reply(
+        f"💰Чистый заработок: {humanize(profile.business.pay * res * profile.business_amount)}$\n💸Выплачено мафии: {humanize(profile.business.mafia_type * mafia)}$\n💳Зарплата рабочим: {humanize(pay * profile.business.max_works * profile.business_amount * profile.business.works_pay_type)}$\n🎫Налоги: {humanize(profile.business.tax * profile.business_amount * res)}$\n💱Итог: {humanize((profile.business.pay * res * profile.business_amount) - tax)}$.\n\nНе забудьте возобновить работу бизнеса командой '!бизнес статистика'.")
+
+
+@plugin.on_startswith_text("бизнес материалы")
+async def on_message(message, attachments, env):
+    profile = await get_or_create_profile(message.from_id)
+    if not profile.business:
+        return await env.reply(f"для того, чтобы использовать бизнес, вам нужно его приобрести.")
+
+    if len(env['args']) < 1:
+        return await env.reply(
+            f"На какой срок вы хотите приобрести материалы для бизнеса (1=1дн)? Используйте !бизнес материалы [кол-во] для покупки.")
+
+    amount = env['args'][0]
+    if not amount.isdigit():
+        return await env.reply('Срок должен указываться исключительно в числовом формате.')
+    if profile.money < int(amount) * profile.business.materials_price:
+        return await env.reply(
+            f'Недостаточно средств (материалов на 1дн. для вашего бизнеса обойдется за {humanize(profile.business.materials_price)}$)')
+    profile.money -= int(amount) * profile.business.materials_price
+    a = datetime.datetime.now().minute
+    if profile.business_materials <= 1:
+        profile.last_bussiness_payout = datetime.datetime.now() + timedelta(minutes=-a)
+    profile.business_materials += int(amount)
+    await manager.update(profile)
+    return await env.reply(
+        f'Вы пополнили количество материалов на {int(amount)}дн. за {humanize(int(amount) * profile.business.materials_price)}$.')
+
+
+@plugin.on_startswith_text("экономика помощь")
+async def on_message(message, attachments, env):
+    vk_message = '''Команды экономики:
+- 📒!профиль <id> - данные о профиле пользователя.
+- ♻!майнер <снять> - снять/просмотреть заработок майнера.
+- 🛍!товары - список товаров.
+- 💸!продать [предмет(дом, автомобиль и т.д)] - продажа имущества.
+- 🤝!передать [id] [сумма] - передача денег пользователю.
+- 🌐!биткоин купить/продать/передать [кол-во] - взаимодействия с биткоинами пользователя.
+- 👑!рейтинг <кол-во> - приобрести/узнать свой рейтинг.
+- 🏆!список богачей - рейтинг самых богатых пользователей.
+- 💰!банк [вложить (сумма)/снять (сумма)/баланс] - взаимодействия с банковским счетом.
+- 🏪!бизнес статистика/снять/материалы - взаимодействия с бизнесом пользователя.
+\n\nАргументы в \"<>\" - необязательны.'''
+    return await env.reply(vk_message)

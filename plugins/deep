@@ -1,0 +1,59 @@
+from kutana import Plugin
+from database import *
+
+from PIL import Image
+import requests
+
+import io
+import aiohttp
+
+api_key = "2906cad9-205f-451e-b62a-cc9440a798dc"
+
+plugin = Plugin(name="Наркомания", cmds=['deepdream [фото] - обрабатывает фото эффектом deepdream'])
+
+
+@plugin.on_startswith_text("deepdream")
+async def on_message(message, attachments, env):
+    if not await get_or_none(Role, user_id=message.from_id, role="vips"):
+        await env.reply("У тебя нету доступа к этой команде.\n Подробнее на моей стене.")
+        return "DONE"
+
+    photo = False
+    for x in attachments:
+        if x.type == "photo":
+            photo = True
+            break
+
+    if not photo:
+        await env.reply('Вы не прислали фото!')
+        return "DONE"
+
+    attach = attachments[0]
+
+    if not attach.link:
+        await env.reply('Вы не прислали фото!')
+        return "DONE"
+
+    r = requests.post(
+        "https://api.deepai.org/api/deepdream",
+        data={
+            'content': attach.link,
+        },
+        headers={'api-key': api_key}
+    ).json()
+
+    if not 'output_url' in r:
+        await env.reply("Ну чёт не вышло!")
+        return "DONE"
+
+    async with aiohttp.ClientSession() as ses2:
+        async with ses2.get(r['output_url']) as response2:
+            img = Image.open(io.BytesIO(await response2.read()))
+
+    # Если всё ок!
+    buffer = io.BytesIO()
+    img.save(buffer, format='PNG')
+    buffer.seek(0)
+
+    result = await env.upload_photo(buffer)
+    return await env.reply("Держи! Следующая обработка будет доступна через 2 минуты!", attachment=result)

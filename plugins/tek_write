@@ -1,0 +1,35 @@
+import random
+from kutana import Plugin
+from database import *
+from utils.static_text import need_vip
+from utils import priviligeshelper
+
+#plugin = Plugin(name="Плагин для фигни))", cmds=[{'command': 'тэк напиши <текст>', 'desc': 'Написать текст'}])
+
+
+#@plugin.on_startswith_text("тэк напиши")
+# async def on_message(message, attachments, env):
+
+#     if not env['args']:
+#         return await env.reply("А текст где?")
+
+#     privs = await priviligeshelper.getUserPriviliges(env, message.from_id)
+#     if not (privs & priviligeshelper.USER_VIP > 0):
+#         return await env.reply(need_vip)
+
+#     if not env.eenv.is_multichat:
+#         return await env.reply("Команда должна выполняться в беседе")
+
+#     finaltext = ""
+#     for text in env['args']:
+#         if not env.eenv.meta_data:
+#             return await env.reply("У бота нету прав администратора")
+
+#         user = random.choice(env.eenv.meta_data.users)
+
+#         if text.lower().find("user") != -1:
+#             finaltext = finaltext + " [id" + str(user['id'])+f"|{user['first_name']} {user['last_name']}]"
+#         else:
+#             finaltext = finaltext + " " + text
+
+#     return await env.reply(finaltext)
